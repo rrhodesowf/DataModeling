@@ -1,0 +1,126 @@
+digraph G {
+  rankdir=LR; splines=true; nodesep=0.6; ranksep=0.7;
+  node [shape=box, fontsize=11, style="rounded"];
+
+  // ---------- Legend ----------
+  subgraph cluster_legend {
+    label="Legend / Conventions"; style="dotted";
+    legend [label="Paths are Unity Catalog: prod.<schema>.<object>\nTABLE = Delta table (partitioned where noted)\nVIEW  = logical view (no storage)\nJobs  = Databricks Workflows (scheduled)"];
+  }
+
+  // ---------- Code & Orchestration ----------
+  subgraph cluster_repo {
+    label="Code & CI"; style="dashed";
+    gh [label="GitHub\n(SQL/views/jobs/tests)\nPRs → Actions"];
+    jobs [label="Databricks Workflows\n• familywall_nightly\n• familywall_hourly_today\n• deploy_views"];
+    gh -> jobs [label="deploy"];
+  }
+
+  // ---------- Unity Catalog: Gold + Dims ----------
+  subgraph cluster_uc {
+    label="Unity Catalog (prod)"; style="dashed";
+
+    subgraph cluster_gold {
+      label="GOLD — FamilyWall marts (Delta TABLEs)"; style="dashed";
+      gold_funnel  [label="TABLE prod.mart_familywall.funnel_obt_daily\nGrain: date×platform×country×channel×campaign×adset×creative×sku\nPartition: date_key"];
+      gold_install [label="TABLE prod.mart_familywall.install_obt_user\nGrain: account/install"];
+      gold_eng     [label="TABLE prod.mart_familywall.engagement_daily\nGrain: date×family_id×platform×country\nPartition: date_key"];
+      gold_revenue [label="TABLE prod.mart_familywall.subscriptions_daily\nGrain: date×store×country×sku\nPartition: date_key"];
+      gold_sync    [label="TABLE prod.mart_familywall.sync_integrations_daily\nGrain: date×family_id×provider\nPartition: date_key"];
+    }
+
+    subgraph cluster_dims {
+      label="Org-wide Dimensions (Delta TABLEs; single copy)"; style="dashed";
+      ddate [label="TABLE prod.org_dim.dim_date\nISO+fiscal, business_day, holiday"];
+      dgeo  [label="TABLE prod.org_dim.dim_geo\ncountry, region, market"];
+      dfx   [label="TABLE prod.org_dim.dim_currency_fx\ndaily fx_to_usd"];
+      dcamp [label="TABLE prod.org_dim.dim_campaign (SCD2)\nowner, objective, stage, valid_from/to"];
+      dcre  [label="TABLE prod.org_dim.dim_creative\ncreative_concept, copy_theme"];
+      dsku  [label="TABLE prod.org_dim.dim_sku_plan\nplan_tier, fee_waiver"];
+      dstore[label="TABLE prod.org_dim.dim_store\niOS vs Android"];
+    }
+
+    // ---------- Source views (joins once, same grain as fact) ----------
+    subgraph cluster_srcview {
+      label="Source Views (VIEWs; facts + dims via as‑of joins)"; style="dashed";
+      src_fun [label="VIEW prod.view_sources.familywall_funnel_source"];
+      src_eng [label="VIEW prod.view_sources.familywall_engagement_source"];
+      src_rev [label="VIEW prod.view_sources.familywall_revenue_source"];
+    }
+
+    // ---------- Metrics layer (math only) ----------
+    subgraph cluster_metrics {
+      label="Metrics / Semantic Layer (VIEWs or UC Metric Views)"; style="dashed";
+      mv_fun [label="VIEW prod.view_metrics.familywall_funnel_daily\nCVRs, CAC variants, ROAS"];
+      mv_eng [label="VIEW prod.view_metrics.familywall_engagement_daily\nActivation & adoption"];
+      mv_rev [label="VIEW prod.view_metrics.familywall_revenue_daily\nARPU, ARPPU, churn, refunds"];
+      mv_coh [label="VIEW prod.view_metrics.familywall_cohort_curves\ninstall_date×day_since_install; LTV/payback"];
+    }
+
+    // ---------- Viz OBTs (materialized) ----------
+    subgraph cluster_viz {
+      label="Viz OBTs (Delta TABLEs + small VIEW)"; style="dashed";
+      viz_fun_hist [label="TABLE prod.viz.familywall_funnel_daily_obt\nCTAS nightly from metrics\nPartition: date_key"];
+      viz_fun_today[label="TABLE prod.viz.familywall_funnel_today_hourly\nHourly today‑only aggregates\nPartition: date_key"];
+      viz_fun_union[label="VIEW  prod.viz.familywall_funnel_plus_today\nUNION(history, today)"];
+
+      viz_eng_hist [label="TABLE prod.viz.familywall_engagement_daily_obt\nCTAS nightly"];
+      viz_rev_hist [label="TABLE prod.viz.familywall_revenue_daily_obt\nCTAS nightly"];
+      viz_cohort   [label="TABLE prod.viz.familywall_cohorts_obt\nCTAS daily"];
+    }
+
+    // ---------- Ops / QA ----------
+    subgraph cluster_ops {
+      label="Ops / QA (Delta TABLEs)"; style="dashed";
+      ops_log [label="TABLE prod.ops.refresh_log\n(job, object, as_of_ts, status)"];
+      ops_tests [label="TABLE prod.ops.data_quality\n(grain checks, thresholds)"];
+    }
+  }
+
+  // ---------- BI ----------
+  bi_fun [label="Tableau — Certified: Funnel\n(incremental extracts)"];
+  bi_eng [label="Tableau — Certified: Engagement"];
+  bi_rev [label="Tableau — Certified: Revenue"];
+  bi_coh [label="Tableau — Certified: Cohorts"];
+
+  // ---------- Data flows ----------
+  gold_funnel->src_fun; gold_install->src_fun;
+  gold_eng->src_eng; gold_sync->src_eng;
+  gold_revenue->src_rev; gold_install->src_rev;
+
+  ddate->src_fun; dgeo->src_fun; dcamp->src_fun; dcre->src_fun; dsku->src_fun; dfx->src_fun; dstore->src_fun;
+  ddate->src_eng; dgeo->src_eng; dsku->src_eng;
+  ddate->src_rev; dgeo->src_rev; dsku->src_rev; dfx->src_rev; dstore->src_rev;
+
+  src_fun->mv_fun; src_eng->mv_eng; src_rev->mv_rev; gold_install->mv_coh; gold_revenue->mv_coh;
+
+  mv_fun->viz_fun_hist; mv_fun->viz_fun_today;
+  mv_eng->viz_eng_hist;
+  mv_rev->viz_rev_hist;
+  mv_coh->viz_cohort;
+
+  viz_fun_hist->viz_fun_union; viz_fun_today->viz_fun_union;
+
+  viz_fun_union->bi_fun;
+  viz_eng_hist->bi_eng;
+  viz_rev_hist->bi_rev;
+  viz_cohort->bi_coh;
+
+  // ---------- Scheduling & logging ----------
+  jobs -> src_fun [label="CREATE/REPLACE VIEW"];
+  jobs -> src_eng [label="CREATE/REPLACE VIEW"];
+  jobs -> src_rev [label="CREATE/REPLACE VIEW"];
+  jobs -> mv_fun  [label="CREATE/REPLACE VIEW"];
+  jobs -> mv_eng  [label="CREATE/REPLACE VIEW"];
+  jobs -> mv_rev  [label="CREATE/REPLACE VIEW"];
+  jobs -> mv_coh  [label="CREATE/REPLACE VIEW"];
+
+  jobs -> viz_fun_hist [label="nightly CTAS"];
+  jobs -> viz_eng_hist [label="nightly CTAS"];
+  jobs -> viz_rev_hist [label="nightly CTAS"];
+  jobs -> viz_cohort   [label="daily CTAS"];
+  jobs -> viz_fun_today[label="hourly upsert"];
+
+  jobs -> ops_log [label="write as_of_ts"];
+  jobs -> ops_tests [label="write results"];
+}
