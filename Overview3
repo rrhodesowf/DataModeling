@@ -1,0 +1,224 @@
+digraph G {
+  rankdir=LR; splines=true; nodesep=0.6; ranksep=0.7;
+  node [shape=box, fontsize=11, style="rounded"];
+
+  // ---------- Legend ----------
+  subgraph cluster_legend {
+    label="Legend / Conventions"; style="dotted";
+    legend [label="Paths use Unity Catalog: prod.<schema>.<object>\nTABLE = Delta table (partitioned where noted)\nVIEW  = logical view (no storage)\n\nNote: CI/CD & scheduling omitted for clarity.\nELT tiers: BRONZE (raw) → SILVER (clean/typed) → GOLD (marts/facts)"];
+  }
+
+  // ---------- Unity Catalog (prod) ----------
+  subgraph cluster_uc {
+    label="Unity Catalog (prod)"; style="dashed";
+
+    // ---------- ELT: BRONZE & SILVER ----------
+    subgraph cluster_elt {
+      label="ELT in Databricks (BRONZE → SILVER)"; style="dashed";
+
+      subgraph cluster_bronze {
+        label="BRONZE — Raw landings"; style="dashed";
+        raw_ads    [label="TABLE prod.bronze.raw_ads_* \n(Google, Meta, DSPs)"];
+        raw_store  [label="TABLE prod.bronze.raw_store_* \n(Apple/Google receipts)"];
+        raw_app    [label="TABLE prod.bronze.raw_app_events_* \n(feature/app events)"];
+        raw_sync   [label="TABLE prod.bronze.raw_sync_runs_* \n(calendar/email providers)"];
+        raw_mmp    [label="TABLE prod.bronze.raw_mmp_* \n(installs/attribution)"];
+        raw_id     [label="TABLE prod.bronze.raw_identity_* \n(users, households, roles)"];
+        raw_crm    [label="TABLE prod.bronze.raw_crm_* \n(email/marketing)"];
+      }
+
+      subgraph cluster_silver {
+        label="SILVER — Cleaned/typed (PII‑safe where applicable)"; style="dashed";
+        clean_ads   [label="TABLE prod.silver.clean_ads_* \n(typed ids, time, fx, campaign keys)"];
+        clean_store [label="TABLE prod.silver.clean_store_* \n(normalized store events: trial/purchase/renew/refund/cancel)"];
+        clean_app   [label="TABLE prod.silver.clean_app_events_* \n(event schema, role, feature_id)"];
+        clean_sync  [label="TABLE prod.silver.clean_sync_runs_* \n(runtime, counts, error codes)"];
+        clean_inst  [label="TABLE prod.silver.clean_installs_* \n(platform, version, country, attribution)"];
+        clean_id    [label="TABLE prod.silver.clean_identity_* \n(pseudonymized person/household/role)"];
+        clean_crm   [label="TABLE prod.silver.clean_crm_*"];
+      }
+
+      // Bronze -> Silver
+      raw_ads  -> clean_ads;
+      raw_store-> clean_store;
+      raw_app  -> clean_app;
+      raw_sync -> clean_sync;
+      raw_mmp  -> clean_inst;
+      raw_id   -> clean_id;
+      raw_crm  -> clean_crm;
+    }
+
+    // ---------- GOLD — FamilyWall marts (existing) ----------
+    subgraph cluster_gold_fw {
+      label="GOLD — FamilyWall marts (Delta TABLEs)"; style="dashed";
+      gold_funnel  [label="TABLE prod.mart_familywall.funnel_obt_daily\nGrain: date×platform×country×channel×campaign×adset×creative×sku\nPartition: date_key"];
+      gold_install [label="TABLE prod.mart_familywall.install_obt_user\nGrain: account/install"];
+      gold_eng     [label="TABLE prod.mart_familywall.engagement_daily\nGrain: date×family_id×platform×country\nPartition: date_key"];
+      gold_revenue [label="TABLE prod.mart_familywall.subscriptions_daily\nGrain: date×store×country×sku\nPartition: date_key"];
+      gold_sync    [label="TABLE prod.mart_familywall.sync_integrations_daily\nGrain: date×family_id×provider\nPartition: date_key"];
+    }
+
+    // ---------- Org-wide Dimensions ----------
+    subgraph cluster_dims {
+      label="Org-wide Dimensions (Delta TABLEs; single copy)"; style="dashed";
+      ddate  [label="TABLE prod.org_dim.dim_date\nISO+fiscal, business_day, holiday"];
+      dgeo   [label="TABLE prod.org_dim.dim_geo\ncountry, region, market"];
+      dfx    [label="TABLE prod.org_dim.dim_currency_fx\ndaily fx_to_usd"];
+      dcamp  [label="TABLE prod.org_dim.dim_campaign (SCD2)\nowner, objective, stage, valid_from/to"];
+      dcre   [label="TABLE prod.org_dim.dim_creative\ncreative_concept, copy_theme"];
+      dsku   [label="TABLE prod.org_dim.dim_sku_plan\nplan_tier, fee_waiver"];
+      dstore [label="TABLE prod.org_dim.dim_store\niOS vs Android"];
+
+      // New / augmented conformed dims
+      dapp    [label="TABLE prod.org_dim.dim_app\nbrand/app across Cozi, FamilyWall, OurFamilyWizard, CustodyNavigator"];
+      dperson [label="TABLE prod.org_dim.dim_person (pseudonymous)\n(is_minor_flag, birth_year_bucket, country)"];
+      dhh     [label="TABLE prod.org_dim.dim_household\n(family/case/circle)"];
+      drole   [label="TABLE prod.org_dim.dim_role\n(parent, child, professional, caregiver)"];
+      dver    [label="TABLE prod.org_dim.dim_app_version\n(os, release_dt, build_channel)"];
+      dprov   [label="TABLE prod.org_dim.dim_provider_integration\n(Google Calendar, Outlook, etc.)"];
+      dsku2   [label="TABLE prod.org_dim.dim_product_sku\nstore-specific SKU → conformed product"];
+      dprice  [label="TABLE prod.org_dim.dim_price_region\n(list_price, currency, effective_from/to)"];
+    }
+
+    // ---------- Source Views ----------
+    subgraph cluster_srcview {
+      label="Source Views (VIEWs; facts + dims via as‑of joins)"; style="dashed";
+      src_fun   [label="VIEW prod.view_sources.familywall_funnel_source"];
+      src_eng   [label="VIEW prod.view_sources.familywall_engagement_source"];
+      src_rev   [label="VIEW prod.view_sources.familywall_revenue_source"];
+
+      // Org-wide source views
+      src_sub   [label="VIEW prod.view_sources.subscription_events_source"];
+      src_feat  [label="VIEW prod.view_sources.feature_usage_source"];
+      src_sync  [label="VIEW prod.view_sources.sync_runs_source"];
+    }
+
+    // ---------- Metrics / Semantic Layer ----------
+    subgraph cluster_metrics {
+      label="Metrics / Semantic Layer (VIEWs or UC Metric Views)"; style="dashed";
+      mv_fun       [label="VIEW prod.view_metrics.familywall_funnel_daily\nCVRs, CAC variants, ROAS"];
+      mv_eng       [label="VIEW prod.view_metrics.familywall_engagement_daily\nActivation & adoption"];
+      mv_rev       [label="VIEW prod.view_metrics.familywall_revenue_daily\nARPU, ARPPU, churn, refunds"];
+      mv_coh       [label="VIEW prod.view_metrics.familywall_cohort_curves\ninstall_date×day_since_install; LTV/payback"];
+
+      // Org-wide metrics
+      mv_rev2      [label="VIEW prod.view_metrics.org_subscription_daily\nARPU, ARPPU, MRR churn (logo/net), refunds"];
+      mv_feat      [label="VIEW prod.view_metrics.feature_adoption\nactivation/adoption by feature, role, version"];
+      mv_sync      [label="VIEW prod.view_metrics.sync_health\nsuccess rate, MTTR, errors"];
+      mv_brand_fun [label="VIEW prod.view_metrics.brand_funnel_daily\nCross-brand funnel, blended CAC & ROAS"];
+    }
+
+    // ---------- Viz OBTs ----------
+    subgraph cluster_viz {
+      label="Viz OBTs (Delta TABLEs + small VIEW)"; style="dashed";
+      viz_fun_hist  [label="TABLE prod.viz.familywall_funnel_daily_obt\nCTAS nightly from metrics\nPartition: date_key"];
+      viz_fun_today [label="TABLE prod.viz.familywall_funnel_today_hourly\nHourly today‑only aggregates\nPartition: date_key"];
+      viz_fun_union [label="VIEW  prod.viz.familywall_funnel_plus_today\nUNION(history, today)"];
+
+      viz_eng_hist  [label="TABLE prod.viz.familywall_engagement_daily_obt\nCTAS nightly"];
+      viz_rev_hist  [label="TABLE prod.viz.familywall_revenue_daily_obt\nCTAS nightly"];
+      viz_cohort    [label="TABLE prod.viz.familywall_cohorts_obt\nCTAS daily"];
+
+      // Org-wide OBTs
+      viz_rev2      [label="TABLE prod.viz.org_revenue_daily_obt\nCTAS nightly"];
+      viz_feat      [label="TABLE prod.viz.feature_usage_daily_obt\nCTAS nightly"];
+      viz_sync      [label="TABLE prod.viz.sync_health_daily_obt\nCTAS hourly"];
+      viz_brand_fun [label="TABLE prod.viz.brand_funnel_daily_obt\nCTAS nightly"];
+    }
+
+    // ---------- Org-wide Cross-brand Facts ----------
+    subgraph cluster_org {
+      label="Org-wide Cross-brand Facts (Delta TABLEs)"; style="dashed";
+      f_sub_ev [label="TABLE prod.mart_org.fact_subscription_events\nGrain: subscription_event_id\nPartition: date_key"];
+      f_feat   [label="TABLE prod.mart_org.fact_feature_usage_daily\nGrain: date×app×household×role×feature\nPartition: date_key"];
+      f_sync   [label="TABLE prod.mart_org.fact_sync_runs\nGrain: run_id\nPartition: date_key"];
+      f_inst   [label="TABLE prod.mart_org.fact_installs\nGrain: install_id\nPartition: date_key"];
+      bridge   [label="TABLE prod.mart_org.bridge_app_user_identity\nGrain: app_user_id×app_id"];
+    }
+
+    // ---------- Ops / QA ----------
+    subgraph cluster_ops {
+      label="Ops / QA (Delta TABLEs)"; style="dashed";
+      ops_log   [label="TABLE prod.ops.refresh_log\n(job, object, as_of_ts, status)"];
+      ops_tests [label="TABLE prod.ops.data_quality\n(grain checks, thresholds)"];
+    }
+  }
+
+  // ---------- BI (Tableau Certified) ----------
+  bi_fun     [label="Tableau — Certified: Funnel\n(incremental extracts)"];
+  bi_eng     [label="Tableau — Certified: Engagement"];
+  bi_rev     [label="Tableau — Certified: Revenue"];
+  bi_coh     [label="Tableau — Certified: Cohorts"];
+
+  // New certified sources
+  bi_brand   [label="Tableau — Certified: Brand Funnel"];
+  bi_feat    [label="Tableau — Certified: Feature Adoption"];
+  bi_org_rev [label="Tableau — Certified: Org Revenue"];
+  bi_sync    [label="Tableau — Certified: Sync Health"];
+
+  // ---------- ELT → GOLD/FACTS wiring ----------
+  // Silver → FamilyWall GOLD
+  clean_ads   -> gold_funnel;
+  clean_store -> gold_revenue;
+  clean_app   -> gold_eng;
+  clean_app   -> gold_install;
+  clean_store -> gold_install;
+  clean_sync  -> gold_sync;
+
+  // Silver → Org-wide FACTS
+  clean_store -> f_sub_ev;
+  clean_app   -> f_feat;
+  clean_sync  -> f_sync;
+  clean_inst  -> f_inst;
+  clean_id    -> bridge;
+
+  // ---------- FamilyWall existing flows ----------
+  gold_funnel->src_fun; gold_install->src_fun;
+  gold_eng->src_eng;     gold_sync->src_eng;
+  gold_revenue->src_rev; gold_install->src_rev;
+
+  ddate->src_fun; dgeo->src_fun; dcamp->src_fun; dcre->src_fun; dsku->src_fun; dfx->src_fun; dstore->src_fun;
+  ddate->src_eng; dgeo->src_eng; dsku->src_eng;
+  ddate->src_rev; dgeo->src_rev; dsku->src_rev; dfx->src_rev; dstore->src_rev;
+
+  src_fun->mv_fun; src_eng->mv_eng; src_rev->mv_rev; gold_install->mv_coh; gold_revenue->mv_coh;
+
+  mv_fun->viz_fun_hist; mv_fun->viz_fun_today;
+  mv_eng->viz_eng_hist;
+  mv_rev->viz_rev_hist;
+  mv_coh->viz_cohort;
+
+  viz_fun_hist->viz_fun_union; viz_fun_today->viz_fun_union;
+
+  viz_fun_union->bi_fun;
+  viz_eng_hist->bi_eng;
+  viz_rev_hist->bi_rev;
+  viz_cohort->bi_coh;
+
+  // ---------- Org-wide flows ----------
+  // Conformed dims → org source views
+  ddate->src_sub; dgeo->src_sub; dfx->src_sub; dstore->src_sub; dsku2->src_sub; dapp->src_sub; dprice->src_sub;
+  ddate->src_feat; dapp->src_feat; dhh->src_feat; drole->src_feat; dver->src_feat; bridge->src_feat;
+  ddate->src_sync; dapp->src_sync; dprov->src_sync;
+
+  // Source views → metrics
+  src_sub->mv_rev2;
+  src_feat->mv_feat;
+  src_sync->mv_sync;
+
+  // Cross-brand funnel metric (existing funnel source + app dim)
+  dapp->mv_brand_fun;
+  src_fun->mv_brand_fun;
+
+  // Metrics → OBTs
+  mv_rev2->viz_rev2;
+  mv_feat->viz_feat;
+  mv_sync->viz_sync;
+  mv_brand_fun->viz_brand_fun;
+
+  // OBTs → Tableau
+  viz_rev2->bi_org_rev;
+  viz_feat->bi_feat;
+  viz_sync->bi_sync;
+  viz_brand_fun->bi_brand;
+}
