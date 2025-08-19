@@ -1,0 +1,64 @@
+digraph G {
+  rankdir=LR; splines=true; nodesep=0.8; ranksep=1.0;
+  node [shape=box, fontsize=11, style="rounded"];
+
+  // --- Ingest job (left) ---
+  subgraph cluster_jobs_ingest {
+    label="Orchestration — Databricks Jobs"; style="dashed";
+    a_ingest [label="", shape=point, width=0, height=0, style=invis]; // anchor
+    job_ingest [label="Job: Ingest raw landings"];
+  }
+
+  // --- BRONZE / raw (next) ---
+  subgraph cluster_bronze {
+    label="BRONZE — Raw landings"; style="dashed";
+    a_bronze [label="", shape=point, width=0, height=0, style=invis]; // anchor
+    raw_ads   [label="raw_ads_* (Google, Meta, DSPs)"];
+    raw_store [label="raw_store_* (Apple/Google receipts)"];
+    raw_app   [label="raw_app_events_* (feature events)"];
+    raw_crm   [label="raw_crm_* (email)"];
+  }
+
+  // --- Build OFW job (to the right of BRONZE) ---
+  subgraph cluster_jobs_build {
+    label="Orchestration — Databricks Job (Build OFW)"; style="dashed";
+    a_build [label="", shape=point, width=0, height=0, style=invis]; // anchor
+    job_ofw_flat [label="Job: Build flat_ofw_rpt_daily (OurFamilyWizard)"];
+  }
+
+  // --- OFW flat table (output of build job) ---
+  ofw_flat [label="flat_ofw_daily (OurFamilyWizard)\nSingle wide table from raw"];
+
+  // --- Tableau (rightmost) ---
+  subgraph cluster_tableau {
+    label="Tableau — Current State"; style="dashed";
+    a_tableau [label="", shape=point, width=0, height=0, style=invis]; // anchor
+    tab_ofw   [label="OFW dashboards\n(connect to flat_ofw_daily)"];
+    tab_other [label="Other apps dashboards\nWorkbook-level metrics & calc fields\n(duplicated per dashboard)"];
+  }
+
+  // --- Layout anchors to enforce left → right cluster order ---
+  a_ingest -> a_bronze -> a_build -> a_tableau [style=invis, weight=100];
+
+  // --- Flow: Ingest job → raw landings ---
+  job_ingest -> raw_ads;
+  job_ingest -> raw_store;
+  job_ingest -> raw_app;
+  job_ingest -> raw_crm;
+
+  // --- Flow: raw → build job → OFW flat table ---
+  raw_ads   -> job_ofw_flat;
+  raw_store -> job_ofw_flat;
+  raw_app   -> job_ofw_flat;
+  raw_crm   -> job_ofw_flat;
+  job_ofw_flat -> ofw_flat;
+
+  // --- Consumption: OFW flat → Tableau (OFW dashboards) ---
+  ofw_flat -> tab_ofw;
+
+  // --- Current pain point: other apps do metrics in Tableau directly off raw ---
+  raw_ads   -> tab_other [style=dotted, constraint=false];
+  raw_store -> tab_other [style=dotted, constraint=false];
+  raw_app   -> tab_other [style=dotted, constraint=false];
+  raw_crm   -> tab_other [style=dotted, constraint=false];
+}
