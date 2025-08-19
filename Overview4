@@ -1,0 +1,112 @@
+digraph G {
+  rankdir=LR; splines=true; nodesep=0.6; ranksep=0.7;
+  node [shape=box, fontsize=11, style="rounded"];
+
+  subgraph cluster_elt {
+    label="ELT in Databricks (Unity Catalog)"; style="dashed";
+
+    subgraph cluster_bronze {
+      label="BRONZE — Raw landings"; style="dashed";
+      raw_ads   [label="raw_ads_* (Google, Meta, DSPs)"];
+      raw_store [label="raw_store_* (Apple/Google receipts)"];
+      raw_app   [label="raw_app_events_* (feature events)"];
+      raw_crm   [label="raw_crm_* (email)"];
+    }
+
+    subgraph cluster_silver {
+      label="SILVER — Cleaned/typed"; style="dashed";
+      clean_ads   [label="clean_ads_* (ids, time, fx)"];
+      clean_store [label="clean_store_* (normalized receipts)"];
+      clean_app   [label="clean_app_events_* (PII-safe, typed)"];
+      clean_crm   [label="clean_crm_*"];
+    }
+
+    subgraph cluster_gold {
+      label="GOLD — FamilyWall marts (flat facts; query‑ready)"; style="dashed";
+      gold_funnel  [label="mart_familywall.funnel_obt_daily\nGrain: date×platform×country×channel×campaign×adset×creative×sku"];
+      gold_install [label="mart_familywall.install_obt_user\nGrain: account/install (for cohorts)"];
+      gold_eng     [label="mart_familywall.engagement_daily\nGrain: date×family_id×platform×country"];
+      gold_revenue [label="mart_familywall.subscriptions_daily\nGrain: date×store×country×sku"];
+      gold_sync    [label="mart_familywall.sync_integrations_daily\nGrain: date×family_id×provider (gcal/outlook)"];
+    }
+
+    // Bronze -> Silver
+    raw_ads->clean_ads; raw_store->clean_store; raw_app->clean_app; raw_crm->clean_crm;
+
+    // Silver -> Gold
+    clean_ads->gold_funnel; 
+    clean_store->gold_revenue; 
+    clean_app->gold_eng; 
+    clean_app->gold_install; 
+    clean_store->gold_install;
+  }
+
+  subgraph cluster_dims {
+    label="Org-wide Dimensions (single copy in UC)"; style="dashed";
+    ddate [label="org_dim.dim_date\nISO & fiscal, business_day, holiday"];
+    dgeo  [label="org_dim.dim_geo\ncountry, region, market"];
+    dfx   [label="org_dim.dim_currency_fx\ndaily fx_to_usd"];
+    dcamp [label="org_dim.dim_campaign (SCD2)\nowner, objective, stage, valid_from/to"];
+    dcre  [label="org_dim.dim_creative\ncreative_concept, copy_theme"];
+    dsku  [label="org_dim.dim_sku_plan\nplan_tier, fee_waiver"];
+    dstore[label="org_dim.dim_store\napp_store vs play"];
+  }
+
+  subgraph cluster_srcview {
+    label="Source Views (facts + dims via as‑of joins)"; style="dashed";
+    src_fun [label="view_sources.familywall_funnel_source"];
+    src_eng [label="view_sources.familywall_engagement_source"];
+    src_rev [label="view_sources.familywall_revenue_source"];
+  }
+
+  subgraph cluster_metrics {
+    label="Metrics / Semantic Layer (views or UC Metric Views)"; style="dashed";
+    mv_fun [label="view_metrics.familywall_funnel_daily\nCVRs, CAC variants, ROAS"];
+    mv_eng [label="view_metrics.familywall_engagement_daily\nActivation & adoption metrics"];
+    mv_rev [label="view_metrics.familywall_revenue_daily\nARPU, ARPPU, churn, refunds"];
+    mv_coh [label="view_metrics.familywall_cohort_* \ninstall_date×day_since_install; LTV/payback"];
+  }
+
+  subgraph cluster_viz {
+    label="Viz OBTs (materialized for speed)"; style="dashed";
+    viz_fun_hist [label="viz.familywall_funnel_daily_obt (nightly)"];
+    viz_fun_today[label="viz.familywall_funnel_today_hourly (hourly)"];
+    viz_fun_union[label="viz.familywall_funnel_plus_today (UNION view)"];
+    viz_eng_hist [label="viz.familywall_engagement_daily_obt (nightly)"];
+    viz_rev_hist [label="viz.familywall_revenue_daily_obt (nightly)"];
+    viz_cohort   [label="viz.familywall_cohorts_obt (daily)"];
+  }
+
+  bi_fun [label="Tableau — Certified: Funnel"];
+  bi_eng [label="Tableau — Certified: Engagement"];
+  bi_rev [label="Tableau — Certified: Revenue"];
+  bi_coh [label="Tableau — Certified: Cohorts"];
+
+  // Facts -> Source Views
+  gold_funnel->src_fun; 
+  gold_install->src_fun;
+  gold_eng->src_eng; 
+  gold_sync->src_eng;
+  gold_revenue->src_rev; 
+  gold_install->src_rev;
+
+  // Dims -> Source Views
+  ddate->src_fun; dgeo->src_fun; dcamp->src_fun; dcre->src_fun; dsku->src_fun; dfx->src_fun; dstore->src_fun;
+  ddate->src_eng; dgeo->src_eng; dsku->src_eng;
+  ddate->src_rev; dgeo->src_rev; dsku->src_rev; dfx->src_rev; dstore->src_rev;
+
+  // Sources -> Metrics
+  src_fun->mv_fun; src_eng->mv_eng; src_rev->mv_rev; 
+  gold_install->mv_coh; gold_revenue->mv_coh;
+
+  // Metrics -> Viz
+  mv_fun->viz_fun_hist; mv_fun->viz_fun_today;
+  viz_fun_hist->viz_fun_union; viz_fun_today->viz_fun_union;
+  mv_eng->viz_eng_hist; mv_rev->viz_rev_hist; mv_coh->viz_cohort;
+
+  // Viz -> BI
+  viz_fun_union->bi_fun; 
+  viz_eng_hist->bi_eng; 
+  viz_rev_hist->bi_rev; 
+  viz_cohort->bi_coh;
+}
